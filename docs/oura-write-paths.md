@@ -1,6 +1,7 @@
 # Posting updates into the Oura ecosystem
 
-Research note: how (and whether) an outside system can push **exercise** and
+Research note: how (and whether) an outside system — specifically the
+health-native Android apps — can push **exercise** and
 **meal** data into a member's Oura account, so that Oura's own crossing of
 sensor data against nutrition and training works without the member typing
 everything into the Oura app by hand.
@@ -174,35 +175,128 @@ Both are member actions, not automation. Neither is scriptable.
 
 ---
 
-## 5. Recommendation
+## 5. What this means for health-native
 
-**Do the crossing yourself; don't fight Oura for it.**
+Investigated `doronperetz/health-native` @ `a824201`. Three sideloaded Android
+apps (`com.health.workout`, `com.health.diabetes`, `com.health.creami`) over a
+shared `core`, with Supabase edge functions behind them.
 
-Oura's Meals feature exists to cross food against its sensor data. But the API
-gives you the sensor half — `daily_activity`, `daily_sleep`, `daily_readiness`,
-`daily_stress`, `daily_spo2`, `workout`, `session`, `heartrate`,
-`daily_cardiovascular_age`, `vO2_max` — and you already own the nutrition and
-training half. Pulling Oura's data down and joining it in your own pipeline is
-strictly more capable than pushing food up: you get real macros instead of
-low/moderate/high bands, arbitrary history instead of same-day, and the result
-is readable (Oura's Meals output is not exposed anywhere).
+### The deployment model is an advantage here
 
-Concretely:
+Builds are signed in CI and published as **GitHub Releases, installed via
+Obtainium** (`build-*.yml` → `gh release create`); `output/` holds a backup APK.
+Nothing ships through Google Play.
 
-1. **Sensor data in** — Oura read API. Register a webhook subscription
-   (`POST /v2/webhook/subscription`) so you're pushed on change rather than
-   polling.
-2. **Workouts out to Oura** — only if you specifically want Oura's Activity
-   Score to reflect training it can't detect. Native app → health store if one
-   exists; otherwise the Strava upload bridge, same-day, with an HR stream.
-3. **Meals** — keep them yours. Offer a copy/share affordance into Oura Meals
-   for members who want Oura's glucose-vs-meal view (only meaningful if they
-   have a Stelo connected).
-4. **Watch for change.** Stelo and Health Panels show Oura builds inbound pipes
-   for partners it chooses. First-class meal ingestion would come through a
-   partnership conversation, not a public endpoint.
+That matters, because the gate on Health Connect data types is a *Play
+publishing* requirement: you declare data-type access in the Play Console "while
+preparing your app for publishing on Google Play," and undeclared types fail at
+review. Off-Play, that gate doesn't apply — the permission is an ordinary
+runtime grant the user approves in the Health Connect UI. This isn't a
+theoretical read: `diabetes` already holds **twelve** health permissions,
+including `READ_HEALTH_DATA_IN_BACKGROUND` and `READ_HEALTH_DATA_HISTORY`
+(normally among the most scrutinised), and they work in production. Adding a
+`WRITE_*` permission is the same shape of change.
 
----
+`connect-client` is pinned at `1.1.0-alpha08` (deliberately — the comment in
+`libs.versions.toml` notes alpha09+ needs compileSdk 35). `insertRecords` is
+long-standing API and present in alpha08, so **no version or SDK bump is
+required.**
+
+### The plumbing already runs in the wrong direction
+
+Today: **Oura → Health Connect → `diabetes` app → Supabase.** `HealthConnectSource`
+is explicitly "Read-only view over Health Connect," with twelve `READ_*`
+permissions and no writes anywhere. `HcPermissions` even documents the recovery
+metrics as "what a ring-style wearable (e.g. Oura) contributes to Health
+Connect." You are already consuming Oura through exactly the pipe you'd need to
+push back through.
+
+### Three concrete obstacles, all in your code
+
+**1. The workout app has no Health Connect at all.** Sessions are logged in
+`com.health.workout` (`buildSessionLog` → `SyncSessionWorker` → `session_log`),
+but every line of Health Connect code lives in `com.health.diabetes`.
+`workout/app/src/main/AndroidManifest.xml` declares three permissions — INTERNET,
+ACCESS_NETWORK_STATE, POST_NOTIFICATIONS — and no health ones. Separate
+`applicationId`s mean separate HC clients and separate user grants. Either add a
+writer to `workout` (correct: it owns the data) or route sessions to `diabetes`.
+
+**2. `SessionLog` throws away the timestamps a write needs.** An
+`ExerciseSessionRecord` requires `startTime`, `endTime`, and zone offsets.
+`SessionLog` carries `date` (a `LocalDate` string) and `durationMin` — and
+`buildSessionLog` takes `startTimestamp` only to compute `durationMin`, then
+discards it. `durationMin` is also nullable when the start is unknown. **Persisting
+start/end instants on `SessionLog` and `session_log` is a prerequisite**, not a
+detail.
+
+One nice thing falls out: `id = "$date-$sessionKey"` is already a stable,
+one-per-type-per-day key — exactly the shape of `metadata.clientRecordId`, which
+makes the HC write idempotent for free.
+
+**3. Writing creates a read-back loop, and one path double-counts.**
+`exerciseSessions()` reads *every* `ExerciseSessionRecord` with no `dataOrigin`
+filter, so the 6h `HealthSyncWorker` would re-ingest anything you write.
+Severity differs by record type:
+
+- **`ExerciseSessionRecord` — survivable.** The round-trip lands a
+  `health_sessions` row with `source = "health_connect"` (a constant in
+  `HealthMappers`), upserted on `(session_type, start_time, source)`. It won't
+  duplicate *itself*, but it will sit alongside the `session_log` row for the
+  same physical workout — and alongside Oura's own auto-detected session at a
+  *different* start time, which upserts as a separate row. Anything unioning
+  those sees one workout as two or three.
+- **`ActiveCaloriesBurnedRecord` — actively wrong. Do not write it.**
+  `hourlyActiveKcal` uses HC's `aggregate`, which sums across every origin with
+  no dedup. Your own code already documents this hazard for steps and works
+  around it with `bucketHourlyMaxByOrigin` — but that guard is *steps-only*.
+  Active calories and `sessionAggregates` have no equivalent, so writing kcal
+  inflates `active_kcal` by exactly the amount you write.
+
+**Write `ExerciseSessionRecord` and nothing else.** No calories, no steps, no
+heart rate — Oura is already the authority on all three, and each one you add
+double-counts on the way back in. Then filter own-package on read: exclude
+`metadata.dataOrigin.packageName == BuildConfig.APPLICATION_ID` in
+`exerciseSessions()` (and add a fake-backed test — CLAUDE.md requires one).
+
+### Recommended shape
+
+1. `WRITE_EXERCISE` in the writing app's manifest, requested as **optional** —
+   mirror the `HcPermissions.optional` pattern so a denied grant degrades to
+   "workout doesn't reach Oura" rather than breaking session logging.
+2. A `HealthConnectSink` alongside `HealthConnectSource` — one `insertRecords`
+   call, `ExerciseSessionRecord` only, `clientRecordId` = the `SessionLog.id`,
+   `exerciseType` mapped from `sessionType` (`exerciseTypeName` in
+   `HealthMappers` already has the int table; you need its inverse).
+3. Chain it off the existing `SyncSessionWorker` path so it retries offline.
+4. Own-package filter on the read side, shipped in the same change.
+
+Expect it to land as a manifest line, ~80 lines of writer, the timestamp change
+through `SessionLog`/`session_log`, and the read-side filter.
+
+### Meals: the mobile app does not unlock this
+
+Worth being blunt, because "we have a mobile app so we can publish to Health
+Connect" is true for exercise and **still false for food**. Health Connect has
+`NutritionRecord` and `HydrationRecord` — but **Oura does not read them**
+(§2a). Writing nutrition to Health Connect is a no-op with respect to Oura: the
+record lands, Oura ignores it. Oura Meals accepts photo, photo upload, or typed
+text, in-app, and nothing else.
+
+So the `analyze-meal-photo` / `evaluate-meal` / `approved_meals` pipeline has no
+route into Oura at any price, with or without a native app. Keep meals yours and
+do the crossing in your own stack — you already hold both halves, and you get
+real macros instead of Oura's low/moderate/high bands. The one member-facing
+option is a share/copy affordance into Oura Meals, which is only worth building
+if there's a Stelo connected to make Oura's glucose-vs-meal view meaningful.
+
+### Is the exercise write even worth it?
+
+The honest answer is: only for one thing. You already read Oura's data in, so
+pushing workouts up adds nothing to *your* reporting. What it buys is Oura's
+**own** model seeing training it can't detect — a gym session with no cadence
+signal — which feeds its Activity Score and next-day readiness. If members act
+on Oura's readiness number, that's a real gap worth closing. If they act on the
+coach report, this is effort spent making a second system agree with the first.
 
 ## Sources
 
@@ -220,6 +314,9 @@ Concretely:
 - [Health Connect data types](https://developer.android.com/health-and-fitness/health-connect/data-types)
 - [HKWorkout — Apple Developer](https://developer.apple.com/documentation/healthkit/hkworkout)
 - [IFTTT — iOS Health + Webhooks](https://ifttt.com/connect/ios_health/maker_webhooks)
+- [Declare access to Health Connect data types](https://developer.android.com/health-and-fitness/guides/health-connect/publish/declare-access)
+- [Android Health Permissions: Guidance and FAQs (Play Console Help)](https://support.google.com/googleplay/android-developer/answer/12991134)
+- `doronperetz/health-native` @ `a824201` — `diabetes/app/src/main/{AndroidManifest.xml,java/com/health/diabetes/healthconnect/*}`, `workout/app/src/main/java/com/health/workout/{domain/SessionLog.kt,data/SyncSessionWorker.kt}`, `gradle/libs.versions.toml`, `.github/workflows/build-*.yml`
 
 Not verifiable: `partnersupport.ouraring.com` ("Using the Oura API", Oura for
 Organizations) is behind Cloudflare and returned 403 to both fetch attempts.
