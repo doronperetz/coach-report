@@ -298,6 +298,105 @@ signal — which feeds its Activity Score and next-day readiness. If members act
 on Oura's readiness number, that's a real gap worth closing. If they act on the
 coach report, this is effort spent making a second system agree with the first.
 
+## 6. Health aggregators as a central store — evaluated, and declined
+
+Follow-up question: is there an aggregator that could sit in the middle —
+integrating Oura, this app, and future sensors — and act as the central
+database, or even supply a usable app?
+
+Short answer: **no, and you already built the thing they sell.** Three
+disqualifiers, in order of how decisive they are.
+
+### a. None of them can write to Oura
+
+This is worth restating because it's the reason the question came up. Terra's
+own Oura page describes a one-way flow; the same holds for Junction, Rook,
+Spike and Metriport. They all wrap the read-only API from §1. **Adopting an
+aggregator does not move the Oura write problem one inch.** Health Connect
+(§5) remains the only inbound path, and only for exercise.
+
+### b. They are ingestion adapters, not databases
+
+Every one of these is pull-only from supported providers. None documents an
+endpoint for pushing *your own* application's data in — a custom workout log, a
+meal entry, a programme spec, a session report. So even after adopting one,
+`session_log`, `approved_meals`, `programme_spec_history`, `session_reports`
+and the coach-report tables still live in Supabase.
+
+That reframes the decision entirely: it is never "replace my central database
+with an aggregator." It is only ever "add an ingestion adapter in front of the
+central database I am keeping regardless." Which makes it a question about
+integration breadth, not architecture.
+
+### c. The pricing is calibrated to B2B, and this is a single-user system
+
+| Platform | Entry price | Notes |
+|---|---|---|
+| Terra | $399/mo annual, $499/mo monthly | 100k credits, ~200/user/mo |
+| Junction (ex-Vital) | $0.50/user/mo, **$300/mo minimum** | 300+ providers incl. Libre, Dexcom |
+| Rook | $399/mo (750 users) | scores +$249, granular data +$249, webhooks +$99 |
+| Spike | ~$450/mo | acquired by Raintree, July 2026 |
+
+$3.6k–6k/year to aggregate one person's data. Dead on arrival.
+
+### What you already have is the same architecture, for free
+
+Health Connect *is* the aggregator, at the OS layer: one integration, granular
+per-type permissions, and any Android-compatible sensor lands in it without new
+code. The `diabetes` app already reads twelve types out of it and copies them
+into Supabase, which is the system of record. That is precisely the shape Terra
+and Junction sell — vendor adapters → normalised schema → your store — except
+the adapter layer is maintained by Google and costs nothing.
+
+You have also already solved Health Connect's one real limitation. HC is a
+transport and staging layer, not an archive: reads are capped at 30 days
+pre-grant and the store is device-local, so a lost or reset phone takes it with
+it. `READ_HEALTH_DATA_HISTORY` plus the 90-day chunked backfill in
+`HealthBackfillWorker` handles the cap, and the Supabase copy handles the
+durability. Both boxes ticked.
+
+### The one option worth tracking
+
+**[Open Wearables](https://github.com/the-momentum/open-wearables)** (MIT,
+~2.4k stars) is the only credible self-hosted entrant: FastAPI + Postgres +
+Redis + Celery behind Docker Compose, with Oura, Garmin, Whoop, Polar, Suunto,
+Ultrahuman, Strava and Fitbit as cloud providers plus HealthKit, Samsung Health
+and Health Connect via SDK. Its own README calls it early-stage with APIs that
+may change before 1.0.
+
+Not now, though. It is read-only, carries no CGM or nutrition support, and for
+your current sources it would duplicate ingestion you already do through Health
+Connect — a second Postgres, a Redis and a Celery worker to maintain, for
+sources already covered. Revisit if you add iOS (HealthKit needs a separate
+integration you don't have) or a device with no Health Connect support.
+
+Metriport is open-source too, but its centre of gravity has moved to FHIR and
+medical-record retrieval via CommonWell/Carequality — a different problem.
+
+### Consumer apps fail the "suits me" test on their own terms
+
+Exist.io, Gyroscope, Levels, Nutrola, Heads Up and the rest are closed
+dashboards. They pull from supported sources and show you correlations. None
+can ingest a programme spec, model a progression protocol, hold Creami recipes,
+or produce a session review — and none can write to Oura either. The app that
+suits you is the one you're already running; a consumer dashboard would be a
+strictly less capable read-only view over a subset of your data.
+
+### The one thing genuinely worth outsourcing
+
+Not the aggregation — the **FreeStyle Libre client**. `libre-sync` is a
+reverse-engineered LibreLinkUp integration: hard-coded `LLU_API_VERSION_DEFAULT
+= '4.16.0'`, regional shard resolution, SHA-256 account-id hashing, manual JWT
+lifecycle. That breaks when Abbott moves, on their schedule, silently. Junction
+carries supported Libre *and* Dexcom integrations, so if the LLU client becomes
+a recurring maintenance tax, that is the single line item where a paid
+aggregator would buy something real — and even then $300/mo for one CGM feed is
+hard to justify against occasionally repairing the client.
+
+**Recommendation: keep Health Connect + Supabase. No aggregator.** Spend the
+effort on the `ExerciseSessionRecord` writer in §5 instead — it closes an
+actual gap, where an aggregator closes none.
+
 ## Sources
 
 - Oura OpenAPI spec: `https://cloud.ouraring.com/v2/static/json/openapi-1.37.json` (via `https://cloud.ouraring.com/v2/docs`)
@@ -312,6 +411,12 @@ coach report, this is effort spent making a second system agree with the first.
 - [Strava API v3 reference](https://developers.strava.com/docs/reference/)
 - [Terra — Oura integration](https://tryterra.co/integrations/oura)
 - [Health Connect data types](https://developer.android.com/health-and-fitness/health-connect/data-types)
+- [Open Wearables (the-momentum/open-wearables)](https://github.com/the-momentum/open-wearables)
+- [Junction (ex-Vital) docs](https://docs.junction.com/home/welcome)
+- [Terra alternatives / pricing comparison](https://sahha.ai/compare/terra-alternatives/)
+- [ROOK competitors / pricing](https://www.tryrook.io/competitors)
+- [Metriport medical API](https://www.metriport.com/medical)
+- [Health Connect 30-day access limitation](https://support.google.com/fit/thread/354458859/health-connect-data-access-limitation-beyond-30-days)
 - [HKWorkout — Apple Developer](https://developer.apple.com/documentation/healthkit/hkworkout)
 - [IFTTT — iOS Health + Webhooks](https://ifttt.com/connect/ios_health/maker_webhooks)
 - [Declare access to Health Connect data types](https://developer.android.com/health-and-fitness/guides/health-connect/publish/declare-access)
