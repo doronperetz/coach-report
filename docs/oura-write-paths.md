@@ -397,6 +397,135 @@ hard to justify against occasionally repairing the client.
 effort on the `ExerciseSessionRecord` writer in §5 instead — it closes an
 actual gap, where an aggregator closes none.
 
+## 7. Write paths from the app and the chat model into Health Connect
+
+Design note: what the apps — and the WhatsApp/coach model behind them — can
+publish to Health Connect, and which of those are worth building.
+
+### The constraint that shapes everything: there is no server → HC path
+
+Health Connect is an **on-device API**. There is no cloud endpoint, no service
+account, no way for a Supabase edge function to insert a record.
+`coach-wa-reply`, `recommend` and `evaluate-meal` all run server-side, so the
+chat model can never write to Health Connect directly.
+
+Every write path therefore has the same shape:
+
+```
+chat model / edge fn ──► Supabase row ──► device app drains it ──► HC insertRecords
+```
+
+The app is always the writer. `core/offline/OfflineSyncWorker` is the existing
+queue in the *outbound* direction (device → Supabase); this needs its mirror —
+an inbound drain. Concretely: a `hc_outbox` table (record type, payload,
+`client_record_id`, `status`), and a WorkerManager job in whichever app holds
+the permission that reads pending rows, calls `insertRecords`, and marks them
+done. Idempotency comes free from `metadata.clientRecordId` +
+`clientRecordVersion` — HC upserts on that key, so a redelivered row replaces
+rather than duplicates.
+
+### What you hold, and where it can go
+
+| Your data | HC record | Permission | Oura reads it? | Loop risk | Verdict |
+|---|---|---|---|---|---|
+| `session_log` (workouts, runs) | `ExerciseSessionRecord` | `WRITE_EXERCISE` | **Yes** | **Yes** — §5 | **Build** |
+| `daily_log.weight_kg` | `WeightRecord` | `WRITE_WEIGHT` | **Yes** | None | **Build** |
+| `glucose_readings` (Libre) | `BloodGlucoseRecord` | `WRITE_BLOOD_GLUCOSE` | No | None | Optional |
+| `approved_meals` | `NutritionRecord` | `WRITE_NUTRITION` | No | None | Low value |
+| — | `HydrationRecord` | `WRITE_HYDRATION` | No | None | Not tracked |
+| `ProgrammeSpec` sessions | `PlannedExerciseSessionRecord` | `WRITE_PLANNED_EXERCISE` | No | None | Speculative |
+| `daily_log.insulin_units` | **no record type exists** | — | — | — | Impossible |
+
+Two things fall out of that table that are easy to miss:
+
+**Only exercise has a loop problem.** The `diabetes` app holds no
+`READ_WEIGHT`, `READ_BLOOD_GLUCOSE` or nutrition permission, so writing those
+types cannot be re-ingested by `HealthSyncWorker` — the round-trip hazard from
+§5 is exercise-specific. Weight in particular is a point measurement, not an
+additive one, so it carries none of the `active_kcal` summing risk either.
+
+**Health Connect has no insulin record type.** `daily_log.insulin_units` has
+nowhere to go, at all. Worth knowing before anyone plans a "publish everything"
+sweep.
+
+### Do NOT write these
+
+Restating from §5 because it's the one way to actively break your own data:
+`ActiveCaloriesBurnedRecord`, `TotalCaloriesBurnedRecord`, `StepsRecord`,
+`HeartRateRecord`, `BasalMetabolicRateRecord`. Oura is already the authority on
+every one, `hourlyActiveKcal` sums across origins with no dedup, and
+`bucketHourlyMaxByOrigin` guards steps only. Each one you write inflates your
+own dashboard by exactly what you wrote.
+
+### Useful applications, ranked
+
+**1. Natural-language activity logging that actually reaches Oura.** The best
+of these by a distance. Oura's own manual workout entry is in-app only — there
+is no API, no automation, no way in. But your coach model already parses free
+text. "Did 45 minutes of swimming this morning" in WhatsApp → `coach-wa-reply`
+resolves it to an `ExerciseSessionRecord` (type, start, end) → outbox → HC →
+Oura credits it toward the Activity Score and next-day readiness. You end up
+with a conversational path into Oura that Oura itself doesn't offer.
+
+This is also where the chat model earns its place rather than being decoration:
+mapping "swimming this morning" onto `EXERCISE_TYPE_SWIMMING_POOL` with a
+plausible start and duration is exactly the fuzzy job it's good at, and the
+`exerciseTypeName` table in `HealthMappers` already has the int mapping to
+invert.
+
+**2. Weight → Oura's expenditure model.** Cheapest real win on the list. Oura
+reads Weight from Health Connect and uses body mass in its energy model;
+`LogScreen` already captures it into `daily_log`. One `WeightRecord` per entry,
+no loop, no double-count, ~15 lines. Also fixes a smaller thing on your side:
+`estimateActiveKcal` currently falls back to a hard-coded 80 kg.
+
+**3. Structured session detail, not just a bare block.** Once
+`ExerciseSessionRecord` is being written, `segments` and `laps` let a strength
+session carry its superset structure and a run carry its splits, rather than
+appearing as one undifferentiated 50-minute block. Costs little on top of the
+writer and makes the record legible to anything that reads it.
+
+**4. Glucose as a device-wide feed — but be clear about the audience.** Oura
+does *not* read blood glucose from Health Connect (its glucose story is the
+direct Stelo partnership), so this buys you nothing with Oura. What it buys is
+every *other* consumer on the device, now and later, without another
+integration. If you write it, **write one stream only.** Your own `libre-sync`
+comment is emphatic that `history` and `realtime` are different series whose
+timestamps sit 50–110s apart and whose values differ by ≥5 mg/dL in ~30% of
+pairs — and Health Connect has no stream discriminator to keep them apart.
+Write `history` (smoothed, finalised) and drop `realtime`, or you rebuild in HC
+precisely the mixed-series bug the `stream` column was added to prevent. Note
+also the volume: ~288 readings/day, so batch the inserts.
+
+**5. Nutrition — populate it, but expect nothing from Oura.** `NutritionRecord`
+carries energy, protein, total carbohydrate and fat, which is exactly the shape
+of `approved_meals`. Oura ignores it (§4), so the only reason to write it is
+other apps on the device. Cheap to add once the outbox exists; don't build the
+outbox *for* it.
+
+**6. Planned sessions — speculative.** `PlannedExerciseSessionRecord` would
+publish your programme's scheduled sessions device-wide, and `ProgrammeSpec`
+maps onto it fairly naturally. No evidence Oura reads planned exercise, so
+treat this as "interesting if something on the device starts consuming it,"
+not as a reason to write code today.
+
+### Build order
+
+1. **`hc_outbox` + inbound drain worker** — the shared mechanism. Everything
+   below is a payload type on top of it.
+2. **`WeightRecord`** — smallest end-to-end slice, no loop risk, proves the
+   drain works against a live Oura read.
+3. **`ExerciseSessionRecord`** — the prerequisite `SessionLog` timestamp
+   change from §5, the own-package read filter, then the writer.
+4. **Chat → exercise** — the parse in `coach-wa-reply` writing outbox rows.
+5. Glucose and nutrition only if a specific consumer appears.
+
+Two things to verify empirically before leaning on any of it, since neither is
+documented: whether Oura ingests Health Connect records written **retroactively**
+(its Strava path is explicitly current-day-only, and the same limit may apply
+here), and how quickly Oura picks up a new record. Test both with the
+`WeightRecord` slice before building the exercise path on the assumption.
+
 ## Sources
 
 - Oura OpenAPI spec: `https://cloud.ouraring.com/v2/static/json/openapi-1.37.json` (via `https://cloud.ouraring.com/v2/docs`)
