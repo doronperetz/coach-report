@@ -56,7 +56,14 @@
   h2{
     font-family:"Barlow Condensed",sans-serif;font-weight:600;font-size:13px;
     text-transform:uppercase;letter-spacing:.12em;color:var(--ink-faint);
-    margin:0 0 10px;
+    margin:0 0 10px;display:flex;align-items:center;gap:8px;
+  }
+  /* The section number is the structure made visible: overall, per exercise,
+     approvals — in that order, on both surfaces. */
+  h2 .num{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:18px;height:18px;border-radius:2px;background:var(--accent);
+    color:#fff;font-size:11px;letter-spacing:0;flex:none;
   }
 
   .card{background:var(--surface);border:1px solid var(--rule);border-radius:3px;padding:16px}
@@ -67,17 +74,6 @@
   .stripe.act{border-left-color:var(--accent)}
   .stripe.crit{border-left-color:var(--crit)}
   .stripe strong{color:var(--ink);font-weight:600}
-
-  table{border-collapse:collapse;width:100%;font-size:13.5px}
-  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--rule);vertical-align:top}
-  th{
-    font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;
-    letter-spacing:.08em;font-size:11px;color:var(--ink-faint);font-weight:600;white-space:nowrap;
-  }
-  td.num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
-  td .was{color:var(--ink-faint);font-size:11.5px;display:block}
-  .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  tr:last-child th,tr:last-child td{border-bottom:0}
 
   .pill{
     display:inline-block;font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;
@@ -107,6 +103,45 @@
 
   .critique{white-space:pre-wrap;font-size:15px;color:var(--ink-soft)}
   .critique strong{color:var(--ink)}
+
+  /* Section 1 — the headline carries the verdict, so it is typeset as one. */
+  .lede{
+    font-family:"Barlow Condensed",sans-serif;font-weight:600;
+    font-size:clamp(19px,4.6vw,23px);line-height:1.2;color:var(--ink);
+    margin:0 0 12px;text-wrap:balance;
+  }
+  .aside{margin-top:14px;border-left:3px solid var(--rule);padding:2px 0 2px 12px}
+  .aside .k{
+    font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;
+    letter-spacing:.12em;font-size:11px;color:var(--ink-faint);display:block;
+  }
+  .aside p{margin:2px 0 0;font-size:14.5px;color:var(--ink-soft);white-space:pre-wrap}
+
+  /* Section 2 — one block per exercise rather than a table row: the numbers are
+     only half of it now, and prose does not fit in a fifth column on a phone. */
+  .ex{border-top:1px solid var(--rule);padding:14px 0}
+  .ex:first-of-type{border-top:0;padding-top:0}
+  .ex:last-of-type{padding-bottom:0}
+  .ex-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .ex-id{font-weight:600;font-size:15.5px}
+  .ex-nums{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums;
+    font-size:12.5px;color:var(--ink-faint);margin-top:5px;
+    display:flex;flex-wrap:wrap;gap:4px 14px;
+  }
+  .ex-nums b{color:var(--ink);font-weight:500}
+  .ex-note{font-size:13.5px;color:var(--ink-faint);margin-top:7px}
+  .ex-analysis{font-size:14.5px;color:var(--ink-soft);margin-top:7px}
+  .ex-next{
+    margin-top:9px;border-left:3px solid var(--accent);background:var(--surface-alt);
+    padding:8px 11px;border-radius:0 3px 3px 0;font-size:14.5px;color:var(--ink);
+  }
+  .ex-next .k{
+    font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;
+    letter-spacing:.12em;font-size:11px;color:var(--accent);display:block;
+  }
+  .withheld{margin-top:14px;font-size:14px;color:var(--ink-soft)}
+  .withheld ul{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
   ol.q{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:8px;color:var(--ink-soft);font-size:15px}
 
   .foot{color:var(--ink-faint);font-size:12.5px;text-align:center;line-height:1.6}
@@ -155,21 +190,72 @@ function screen(title, detail) {
     (detail ? `<p class="sub">${esc(detail)}</p>` : "") + `</div>`;
 }
 
-function scoresTable(scores) {
-  if (!scores?.length) return "";
-  const rows = scores.map((s) => {
-    const v = VERDICT[s.verdict] ?? { label: s.verdict, cls: "skip" };
-    return `<tr>
-      <td>${esc(s.exercise_id)}${s.note ? `<span class="was">${esc(s.note)}</span>` : ""}</td>
-      <td class="num">${esc(s.previous ?? "—")}</td>
-      <td class="num">${esc(s.actual ?? "—")}</td>
-      <td class="num">${esc(s.spec)}</td>
-      <td><span class="pill ${v.cls}">${esc(v.label)}</span></td>
-    </tr>`;
-  }).join("");
-  return `<section class="card"><h2>Scorecard</h2><div class="table-scroll"><table>
-    <thead><tr><th>Exercise</th><th>Prev</th><th>This session</th><th>Spec</th><th></th></tr></thead>
-    <tbody>${rows}</tbody></table></div></section>`;
+function heading(n, title) {
+  return `<h2><span class="num">${n}</span>${esc(title)}</h2>`;
+}
+
+/**
+ * Reports are read back months after they were written. Ones stored before the
+ * three-section split have a single `critique` blob and no `overall`, so they
+ * are normalised into the same shape rather than rendering as an empty section.
+ */
+function overallOf(r) {
+  const o = r.overall;
+  if (o && ((o.headline ?? "").trim() || (o.summary ?? "").trim())) return o;
+  return { headline: "", summary: r.critique ?? "" };
+}
+
+function aside(label, text) {
+  return text && String(text).trim()
+    ? `<div class="aside"><span class="k">${esc(label)}</span><p>${esc(text)}</p></div>`
+    : "";
+}
+
+function overallSection(r) {
+  const o = overallOf(r);
+  const body = [
+    o.headline?.trim() ? `<p class="lede">${esc(o.headline)}</p>` : "",
+    o.summary?.trim() ? `<div class="critique">${esc(o.summary)}</div>` : "",
+    aside("Readiness", o.readiness_note),
+    aside("Programme", o.programme_note),
+  ].filter(Boolean).join("");
+
+  return `<section class="card">${heading(1, "Overall")}${
+    body || `<p class="sub">No overall read was produced for this session.</p>`
+  }</section>`;
+}
+
+/**
+ * One block per exercise: verdict, the numbers side by side, then the reading
+ * and — set apart, because it is the only line about the future — what to
+ * emphasise next time.
+ */
+function exerciseBlock(s) {
+  const v = VERDICT[s.verdict] ?? { label: s.verdict, cls: "skip" };
+  const num = (label, value) => `<span>${esc(label)} <b>${esc(value)}</b></span>`;
+
+  return `<div class="ex">
+    <div class="ex-head">
+      <span class="ex-id">${esc(s.exercise_id)}</span>
+      <span class="pill ${v.cls}">${esc(v.label)}</span>
+    </div>
+    <div class="ex-nums">
+      ${num("spec", s.spec)}${num("prev", s.previous ?? "—")}${num("this session", s.actual ?? "not logged")}
+    </div>
+    ${s.note ? `<div class="ex-note">${esc(s.note)}</div>` : ""}
+    ${s.analysis ? `<div class="ex-analysis">${esc(s.analysis)}</div>` : ""}
+    ${s.emphasis
+      ? `<div class="ex-next"><span class="k">Next time</span>${esc(s.emphasis)}</div>`
+      : ""}
+  </div>`;
+}
+
+function exerciseSection(scores) {
+  return `<section class="card">${heading(2, "Per exercise")}${
+    scores?.length
+      ? scores.map(exerciseBlock).join("")
+      : `<p class="sub">No exercises to score — the spec has no entry for this session type.</p>`
+  }</section>`;
 }
 
 function proposalCard(p) {
@@ -203,7 +289,7 @@ function render(state) {
     `<div class="stripe crit"><strong>${esc(h.issue)}</strong><br>${esc(h.action)}</div>`).join("");
 
   const pendingBanner = pending.length
-    ? `<div class="stripe act"><strong>${pending.length} change${pending.length > 1 ? "s" : ""} awaiting your decision.</strong> Approving writes to the training programme and posts a receipt to WhatsApp.</div>`
+    ? `<div class="stripe act"><strong>${pending.length} change${pending.length > 1 ? "s" : ""} awaiting your decision</strong> in section 3 below. Approving writes to the training programme and posts a receipt to WhatsApp.</div>`
     : "";
 
   const questions = (r.open_questions ?? []).length
@@ -211,6 +297,20 @@ function render(state) {
         r.open_questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>
        <p class="sub" style="margin-top:12px">Reply in the WhatsApp group to answer — the coach reads the group.</p></section>`
     : "";
+
+  const withheld = (r.withheld ?? []).length
+    ? `<div class="withheld"><strong>Withheld ${r.withheld.length} change${
+        r.withheld.length > 1 ? "s" : ""}</strong> the session data does not support:
+       <ul>${r.withheld.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>`
+    : "";
+
+  // Section 3 renders even with nothing in it: "nothing was proposed" is a
+  // result of the review, not an absence of one.
+  const approvals = `<section class="card">${heading(3, "Progression approvals")}${
+    proposals.length
+      ? proposals.map(proposalCard).join("")
+      : `<p class="sub">No programme changes proposed — the spec is unchanged.</p>`
+  }${withheld}</section>`;
 
   root.innerHTML = `
     <header>
@@ -221,9 +321,9 @@ function render(state) {
     ${pendingBanner}
     ${hygiene}
     ${validity}
-    ${proposals.length ? `<section class="card"><h2>Programme changes</h2>${proposals.map(proposalCard).join("")}</section>` : ""}
-    ${scoresTable(r.scores)}
-    ${r.critique ? `<section class="card"><h2>Coach's notes</h2><div class="critique">${esc(r.critique)}</div></section>` : ""}
+    ${overallSection(r)}
+    ${exerciseSection(r.scores)}
+    ${approvals}
     ${r.annotation_note ? `<div class="stripe">${esc(r.annotation_note)}</div>` : ""}
     ${questions}
     <p class="foot">This link is private — anyone holding it can read this report<br>and approve the changes on it.</p>
