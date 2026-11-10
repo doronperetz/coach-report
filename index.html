@@ -58,13 +58,27 @@
     text-transform:uppercase;letter-spacing:.12em;color:var(--ink-faint);
     margin:0 0 10px;display:flex;align-items:center;gap:8px;
   }
-  /* The section number is the structure made visible: overall, per exercise,
-     approvals — in that order, on both surfaces. */
-  h2 .num{
-    display:inline-flex;align-items:center;justify-content:center;
-    width:18px;height:18px;border-radius:2px;background:var(--accent);
-    color:#fff;font-size:11px;letter-spacing:0;flex:none;
+  /* Next time: the part that gets re-read in the car park, so it is the one
+     list on the page set in full-strength ink. */
+  ul.next{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:10px}
+  ul.next li{
+    border-left:3px solid var(--accent);background:var(--surface-alt);
+    padding:9px 12px;border-radius:0 3px 3px 0;font-size:15.5px;color:var(--ink);
   }
+  ul.plain{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;color:var(--ink-soft);font-size:14.5px}
+
+  /* Run reps: a real table, because here the numbers line up and mean more
+     side by side than stacked. */
+  .scroll{overflow-x:auto}
+  table.reps{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:14.5px}
+  table.reps th{
+    font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;letter-spacing:.1em;
+    font-size:11px;font-weight:600;color:var(--ink-faint);text-align:left;padding:0 8px 6px 0;
+  }
+  table.reps td{padding:8px 8px 8px 0;border-top:1px solid var(--rule);vertical-align:baseline;white-space:nowrap}
+  table.reps td.n{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:13.5px}
+  .facts{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:12px;font-size:14px;color:var(--ink-soft)}
+  .facts b{color:var(--ink);font-weight:600}
 
   .card{background:var(--surface);border:1px solid var(--rule);border-radius:3px;padding:16px}
 
@@ -170,12 +184,33 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 
 const VERDICT = {
-  met:            { label:"met",        cls:"ok"   },
-  exceeded:       { label:"exceeded",   cls:"up"   },
-  partially_met:  { label:"partial",    cls:"hold" },
-  missed:         { label:"missed",     cls:"bad"  },
-  not_performed:  { label:"skipped",    cls:"skip" },
+  met:            { label:"on target",    cls:"ok"   },
+  exceeded:       { label:"above target", cls:"up"   },
+  partially_met:  { label:"partly there", cls:"hold" },
+  missed:         { label:"short",        cls:"bad"  },
+  not_performed:  { label:"skipped",      cls:"skip" },
 };
+
+const FIELD = {
+  weight_kg:   { label:"weight", unit:" kg" },
+  target_reps: { label:"reps",   unit:"" },
+  sets:        { label:"sets",   unit:"" },
+};
+
+// The name the client knows an exercise by; the id with its underscores
+// removed when the report predates stored names.
+function nameOf(r, id) {
+  const named = r?.names?.[id];
+  if (named) return named;
+  const words = String(id ?? "").replace(/_/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Exercise";
+}
+
+function friendlyDate(d) {
+  if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(d ?? "")) return d ?? "";
+  return new Intl.DateTimeFormat("en-GB", { timeZone:"UTC", weekday:"long", day:"numeric", month:"long" })
+    .format(new Date(`${d}T00:00:00Z`));
+}
 
 function api(path, opts) {
   return fetch(`${SUPABASE_URL}/functions/v1/coach-report/${encodeURIComponent(token)}${path}`, {
@@ -190,8 +225,8 @@ function screen(title, detail) {
     (detail ? `<p class="sub">${esc(detail)}</p>` : "") + `</div>`;
 }
 
-function heading(n, title) {
-  return `<h2><span class="num">${n}</span>${esc(title)}</h2>`;
+function heading(title) {
+  return `<h2>${esc(title)}</h2>`;
 }
 
 /**
@@ -216,11 +251,11 @@ function overallSection(r) {
   const body = [
     o.headline?.trim() ? `<p class="lede">${esc(o.headline)}</p>` : "",
     o.summary?.trim() ? `<div class="critique">${esc(o.summary)}</div>` : "",
-    aside("Readiness", o.readiness_note),
-    aside("Programme", o.programme_note),
+    aside("What you brought to it", o.readiness_note),
+    aside("On the programme", o.programme_note),
   ].filter(Boolean).join("");
 
-  return `<section class="card">${heading(1, "Overall")}${
+  return `<section class="card">${
     body || `<p class="sub">No overall read was produced for this session.</p>`
   }</section>`;
 }
@@ -230,17 +265,17 @@ function overallSection(r) {
  * and — set apart, because it is the only line about the future — what to
  * emphasise next time.
  */
-function exerciseBlock(s) {
+function exerciseBlock(s, r) {
   const v = VERDICT[s.verdict] ?? { label: s.verdict, cls: "skip" };
   const num = (label, value) => `<span>${esc(label)} <b>${esc(value)}</b></span>`;
 
   return `<div class="ex">
     <div class="ex-head">
-      <span class="ex-id">${esc(s.exercise_id)}</span>
+      <span class="ex-id">${esc(nameOf(r, s.exercise_id))}</span>
       <span class="pill ${v.cls}">${esc(v.label)}</span>
     </div>
     <div class="ex-nums">
-      ${num("spec", s.spec)}${num("prev", s.previous ?? "—")}${num("this session", s.actual ?? "not logged")}
+      ${num("target", s.spec)}${num("last time", s.previous ?? "—")}${num("today", s.actual ?? "not logged")}
     </div>
     ${s.note ? `<div class="ex-note">${esc(s.note)}</div>` : ""}
     ${s.analysis ? `<div class="ex-analysis">${esc(s.analysis)}</div>` : ""}
@@ -250,22 +285,79 @@ function exerciseBlock(s) {
   </div>`;
 }
 
-function exerciseSection(scores) {
-  return `<section class="card">${heading(2, "Per exercise")}${
-    scores?.length
-      ? scores.map(exerciseBlock).join("")
-      : `<p class="sub">No exercises to score — the spec has no entry for this session type.</p>`
-  }</section>`;
+function exerciseSection(r) {
+  const scores = r.scores ?? [];
+  if (!scores.length) {
+    // A run has its own table; anything else with no scores had nothing to
+    // score against, which is worth saying.
+    return r.run ? "" : `<section class="card">${heading("Exercise by exercise")}
+      <p class="sub">Nothing to score — the programme has no entry for this session type.</p></section>`;
+  }
+  return `<section class="card">${heading("Exercise by exercise")}${
+    scores.map((s) => exerciseBlock(s, r)).join("")}</section>`;
 }
 
-function proposalCard(p) {
+const BAND = {
+  in:    { label:"in band", cls:"ok"   },
+  below: { label:"below",   cls:"hold" },
+  above: { label:"above",   cls:"bad"  },
+};
+
+/** The run's numbers: one row per work rep, or distance and splits. */
+function runSection(r) {
+  const run = r.run;
+  if (!run) return "";
+  const fact = (label, value) =>
+    value === null || value === undefined || value === "" ? "" : `<span>${esc(label)} <b>${esc(value)}</b></span>`;
+
+  let table = "";
+  if ((run.reps ?? []).length) {
+    const rows = run.reps.map((rep) => {
+      const b = BAND[rep.band];
+      const target = rep.hr_low != null && rep.hr_high != null ? `${rep.hr_low}–${rep.hr_high}` : "—";
+      return `<tr>
+        <td>${esc(rep.label)}${rep.completed === false ? " (not finished)" : ""}</td>
+        <td class="n">${esc(rep.actual_kph ?? rep.planned_kph ?? "—")} kph</td>
+        <td class="n">${esc(rep.hr_end_bpm ?? "—")}</td>
+        <td class="n">${esc(target)}</td>
+        <td>${b ? `<span class="pill ${b.cls}">${b.label}</span>` : ""}${rep.discomfort ? ` <span class="pill bad">discomfort</span>` : ""}</td>
+      </tr>`;
+    }).join("");
+    table = `<div class="scroll"><table class="reps"><thead><tr><th>Rep</th><th>Speed</th><th>End HR</th><th>Target</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  const splits = (run.splits ?? []).map((s) => `${s.km_from}–${s.km_to} km @ ${s.speed_kph} kph`).join(", ");
+  const g = run.glucose;
+  const facts = [
+    fact("distance", run.distance_km != null ? `${run.distance_km} km` : null),
+    fact("splits", splits),
+    fact("heart rate", run.hr ? `avg ${run.hr.avg} / max ${run.hr.max}` : null),
+    fact("glucose before", g?.pre),
+    fact("during", g && g.first != null && g.last != null ? `${g.first} → ${g.last}` : null),
+    fact("lowest", g?.min),
+    run.stopped_early ? fact("stopped early", run.stop_reason ?? "yes") : "",
+  ].join("");
+
+  return `<section class="card">${heading("The numbers")}${table}${
+    facts ? `<div class="facts">${facts}</div>` : ""}</section>`;
+}
+
+function listSection(title, items, cls) {
+  const list = (items ?? []).map((s) => String(s ?? "").trim()).filter(Boolean);
+  return list.length
+    ? `<section class="card">${heading(title)}<ul class="${cls}">${
+        list.map((s) => `<li>${esc(s)}</li>`).join("")}</ul></section>`
+    : "";
+}
+
+function proposalCard(p, r) {
+  const f = FIELD[p.field] ?? { label: p.field, unit: "" };
   const decided = p.status !== "proposed";
   const verb = { applied:"Approved", rejected:"Declined", superseded:"Superseded" }[p.status];
   return `<div class="prop ${decided ? "decided" : ""}" data-id="${esc(p.id)}">
-    <div class="change">${esc(p.session_key)} · ${esc(p.exercise_id)} · ${esc(p.field)}
-      ${esc(p.from_value)} → ${esc(p.to_value)}</div>
+    <div class="change">${esc(nameOf(r, p.exercise_id))} — ${esc(f.label)}
+      ${esc(p.from_value)} → ${esc(p.to_value)}${esc(f.unit)}</div>
     <div class="why">${esc(p.rationale)}</div>
-    <div class="rule">[${esc(p.rule_id)}]</div>
     ${decided
       ? `<div class="rule">${esc(verb)}${p.decided_via === "report_page" ? " here" : p.decided_via === "whatsapp_reaction" ? " by 👍" : ""}</div>`
       : `<div class="actions">
@@ -279,10 +371,17 @@ function render(state) {
   const r = state.report ?? {};
   const proposals = state.proposals ?? [];
   const pending = proposals.filter((p) => p.status === "proposed");
-  const meta = [r.session_date, state.session_log_id].filter(Boolean).join(" · ");
+  const meta = friendlyDate(r.session_date);
+
+  // What kind of review this is comes before the review itself.
+  const hrBanner = r.revision === "correction"
+    ? `<div class="stripe act"><strong>Updated now that heart rate has synced.</strong> This replaces the earlier review of this run.</div>`
+    : r.hr_status === "missing"
+    ? `<div class="stripe warn"><strong>Heart rate hasn't synced from Oura yet.</strong> This is a first read on pace, effort and glucose only. Open the Oura app to sync the ring — an updated review follows on its own.</div>`
+    : "";
 
   const validity = r.validity && r.validity.status !== "valid" && r.validity.reason
-    ? `<div class="stripe warn"><strong>${r.validity.status === "invalid" ? "Not a valid capacity read" : "Partially valid"}.</strong> ${esc(r.validity.reason)}</div>`
+    ? `<div class="stripe warn"><strong>${r.validity.status === "invalid" ? "Not counting this one as a read of what you can do" : "Counting this one only in part"}.</strong> ${esc(r.validity.reason)}</div>`
     : "";
 
   // Reports stored before the server normalised this field may hold a JSON
@@ -297,27 +396,27 @@ function render(state) {
     `<div class="stripe crit"><strong>${esc(h.issue)}</strong><br>${esc(h.action)}</div>`).join("");
 
   const pendingBanner = pending.length
-    ? `<div class="stripe act"><strong>${pending.length} change${pending.length > 1 ? "s" : ""} awaiting your decision</strong> in section 3 below. Approving writes to the training programme and posts a receipt to WhatsApp.</div>`
+    ? `<div class="stripe act"><strong>${pending.length} change${pending.length > 1 ? "s" : ""} awaiting your decision</strong> below. Approving writes to the training programme and posts a receipt to WhatsApp.</div>`
     : "";
 
   const questions = (r.open_questions ?? []).length
-    ? `<section class="card"><h2>Open questions</h2><ol class="q">${
+    ? `<section class="card"><h2>${r.open_questions.length > 1 ? "Questions for you" : "A question for you"}</h2><ol class="q">${
         r.open_questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ol>
        <p class="sub" style="margin-top:12px">Reply in the WhatsApp group to answer — the coach reads the group.</p></section>`
     : "";
 
   const withheld = (r.withheld ?? []).length
-    ? `<div class="withheld"><strong>Withheld ${r.withheld.length} change${
-        r.withheld.length > 1 ? "s" : ""}</strong> the session data does not support:
+    ? `<div class="withheld"><strong>Held back ${r.withheld.length} change${
+        r.withheld.length > 1 ? "s" : ""}</strong> the numbers don't support yet:
        <ul>${r.withheld.map((w) => `<li>${esc(w)}</li>`).join("")}</ul></div>`
     : "";
 
-  // Section 3 renders even with nothing in it: "nothing was proposed" is a
-  // result of the review, not an absence of one.
-  const approvals = `<section class="card">${heading(3, "Progression approvals")}${
+  // Renders even with nothing in it: "nothing was proposed" is a result of the
+  // review, not an absence of one.
+  const approvals = `<section class="card">${heading(proposals.length ? "To approve" : "Programme")}${
     proposals.length
-      ? proposals.map(proposalCard).join("")
-      : `<p class="sub">No programme changes proposed — the spec is unchanged.</p>`
+      ? proposals.map((p) => proposalCard(p, r)).join("")
+      : `<p class="sub">No changes to the programme from this one.</p>`
   }${withheld}</section>`;
 
   root.innerHTML = `
@@ -326,14 +425,18 @@ function render(state) {
       <h1>${esc(r.session_label ?? "Session")}</h1>
       <p class="sub">${esc(meta)}</p>
     </header>
+    ${hrBanner}
     ${pendingBanner}
     ${hygiene}
     ${validity}
     ${overallSection(r)}
-    ${exerciseSection(r.scores)}
+    ${listSection("Next time", r.next_time, "next")}
     ${approvals}
-    ${r.annotation_note ? `<div class="stripe">${esc(r.annotation_note)}</div>` : ""}
     ${questions}
+    ${runSection(r)}
+    ${exerciseSection(r)}
+    ${listSection("What I factored in", r.considered, "plain")}
+    ${r.annotation_note ? `<div class="stripe">${esc(r.annotation_note)}</div>` : ""}
     <p class="foot">This link is private — anyone holding it can read this report<br>and approve the changes on it.</p>
   `;
 
